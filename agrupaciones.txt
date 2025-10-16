@@ -1,5 +1,1 @@
-{
-    "WIFUSDT": 0.001,
-    "ADAUSDT": 0.01,
-    "1000PEPEUSDT": 0.0001
-}
+
