@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import asyncio
 import requests
 import json
@@ -638,3 +637,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = OrderBookAnalyzerGUI(root)
     root.mainloop()
+
