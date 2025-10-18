@@ -8,6 +8,7 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 import threading
 from datetime import datetime
 from collections import defaultdict, Counter
+import pyperclip
 
 # ---------- FUNCIONES UTILITARIAS ----------
 
@@ -242,6 +243,10 @@ class OrderBookAnalyzerGUI:
                                      foreground='#ef4444')
         self.status_label.pack(side='right', padx=10)
         
+        self.copy_label = ttk.Label(header_frame, text="", 
+                                   foreground='#22c55e', font=('Arial', 10, 'bold'))
+        self.copy_label.pack(side='right', padx=10)
+        
         # Control buttons
         control_frame = ttk.Frame(self.root)
         control_frame.pack(fill='x', padx=20, pady=5)
@@ -323,7 +328,7 @@ class OrderBookAnalyzerGUI:
         info_frame = tk.Frame(results_frame, bg='#334155', relief='groove', bd=2)
         info_frame.pack(fill='x', padx=10, pady=5)
         
-        tk.Label(info_frame, text="💡 Haz clic en los precios para seleccionar/deseleccionar • Cambia el método de cálculo arriba", 
+        tk.Label(info_frame, text="💡 Haz clic en los precios para seleccionar/deseleccionar • Se copia automáticamente al portapapeles • Cambia el método de cálculo arriba", 
                 bg='#334155', fg='#fbbf24', font=('Arial', 10, 'bold')).pack(pady=8)
         
         self.results_text = scrolledtext.ScrolledText(results_frame, wrap=tk.WORD,
@@ -571,15 +576,28 @@ class OrderBookAnalyzerGUI:
         current_selection = self.shocks_seleccionados[symbol][tipo]
         
         if current_selection == precio:
+            # Deseleccionar
             self.shocks_seleccionados[symbol][tipo] = None
             self.results_text.tag_remove('selected', f"{tag_id}.first", f"{tag_id}.last")
         else:
+            # Seleccionar
             if current_selection is not None:
                 old_tag = f"{symbol}_{tipo}_{current_selection}"
                 self.results_text.tag_remove('selected', f"{old_tag}.first", f"{old_tag}.last")
             
             self.shocks_seleccionados[symbol][tipo] = precio
             self.results_text.tag_add('selected', f"{tag_id}.first", f"{tag_id}.last")
+            
+            # Copiar al portapapeles
+            precio_str = f"{precio:.10f}".rstrip('0').rstrip('.')
+            try:
+                pyperclip.copy(precio_str)
+                # Mostrar en el label de estado
+                self.copy_label.config(text=f"✓ Copiado: {precio_str}")
+                # Limpiar el mensaje después de 2 segundos
+                self.root.after(2000, lambda: self.copy_label.config(text=""))
+            except Exception as e:
+                print(f"Error al copiar al portapapeles: {e}")
     
     def agregar_resultado(self, texto, tag=None):
         if isinstance(tag, tuple):
