@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import requests
 import json
@@ -7,6 +8,7 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 import threading
 from datetime import datetime
 from collections import defaultdict, Counter
+from decimal import Decimal, ROUND_DOWN
 import pyperclip
 
 # ---------- FUNCIONES UTILITARIAS ----------
@@ -30,93 +32,61 @@ def agrupar_precio_manual(price, agrupacion):
     decimales = decimales_por_valor(agrupacion)
     return round(agrupado, decimales)
 
+def obtener_nivel_agrupacion_optimo(tick_size, precio_actual):
+    """Calcula la agrupación óptima basada en el precio actual"""
+    try:
+        if precio_actual is None or precio_actual <= 0:
+            return tick_size
+        
+        # Determinar agrupación base según el rango de precio
+        if precio_actual >= 100:
+            agrupacion_base = 10.0
+        elif precio_actual >= 10:
+            agrupacion_base = 1.0
+        elif precio_actual >= 1:
+            agrupacion_base = 0.1
+        elif precio_actual >= 0.1:
+            agrupacion_base = 0.01
+        elif precio_actual >= 0.01:
+            agrupacion_base = 0.001
+        elif precio_actual >= 0.001:
+            agrupacion_base = 0.0001
+        else:
+            agrupacion_base = 0.00001
+        
+        # Verificar que sea divisible por el tick_size
+        tick_decimal = Decimal(str(tick_size))
+        agrupacion_decimal = Decimal(str(agrupacion_base))
+        cociente = agrupacion_decimal / tick_decimal
+        
+        if cociente % 1 == 0:
+            return agrupacion_base
+        
+        # Si no es divisible, buscar el nivel más cercano que sí lo sea
+        niveles_posibles = [0.00001, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100]
+        
+        for nivel in reversed(niveles_posibles):
+            nivel_decimal = Decimal(str(nivel))
+            cociente = nivel_decimal / tick_decimal
+            if cociente % 1 == 0 and nivel <= agrupacion_base:
+                return nivel
+        
+        return tick_size
+        
+    except Exception as e:
+        return tick_size
+
 # ---------- MÉTODOS DE CÁLCULO QUIRÚRGICO ----------
 
 def calcular_precio_moda(price_count, tick, decimales_tick):
-    """Encuentra el precio con mayor volumen (más quirúrgico)"""
+    """Encuentra el precio con mayor volumen"""
     if not price_count:
         return 0
     precio_max = max(price_count.items(), key=lambda x: x[1])[0]
     return round(round(precio_max / tick) * tick, decimales_tick)
 
-def calcular_precio_mediana_ponderada(price_count, tick, decimales_tick):
-    """Calcula la mediana ponderada por volumen"""
-    if not price_count:
-        return 0
-    
-    # Ordenar precios
-    sorted_prices = sorted(price_count.items())
-    total_qty = sum(qty for _, qty in sorted_prices)
-    target_qty = total_qty / 2
-    
-    cumulative = 0
-    for price, qty in sorted_prices:
-        cumulative += qty
-        if cumulative >= target_qty:
-            return round(round(price / tick) * tick, decimales_tick)
-    
-    return round(round(sorted_prices[-1][0] / tick) * tick, decimales_tick)
-
-def calcular_precio_densidad_maxima(price_count, tick, decimales_tick, ventana_porcentaje=0.05):
-    """Encuentra el área con mayor densidad de órdenes (ventana deslizante)"""
-    if not price_count:
-        return 0
-    
-    sorted_prices = sorted(price_count.items())
-    if len(sorted_prices) < 2:
-        return calcular_precio_moda(price_count, tick, decimales_tick)
-    
-    # Calcular rango de precios
-    min_price = sorted_prices[0][0]
-    max_price = sorted_prices[-1][0]
-    ventana = (max_price - min_price) * ventana_porcentaje
-    
-    max_densidad = 0
-    mejor_precio = sorted_prices[0][0]
-    
-    # Ventana deslizante
-    for precio_central, _ in sorted_prices:
-        densidad = sum(qty for p, qty in sorted_prices 
-                      if abs(p - precio_central) <= ventana)
-        
-        if densidad > max_densidad:
-            max_densidad = densidad
-            mejor_precio = precio_central
-    
-    return round(round(mejor_precio / tick) * tick, decimales_tick)
-
-def calcular_precio_clustering(price_count, tick, decimales_tick):
-    """Agrupa precios cercanos y encuentra el centro del cluster más grande"""
-    if not price_count:
-        return 0
-    
-    sorted_prices = sorted(price_count.items())
-    
-    # Agrupar precios cercanos (dentro de 3 ticks)
-    clusters = []
-    current_cluster = [sorted_prices[0]]
-    
-    for i in range(1, len(sorted_prices)):
-        if sorted_prices[i][0] - current_cluster[-1][0] <= tick * 3:
-            current_cluster.append(sorted_prices[i])
-        else:
-            clusters.append(current_cluster)
-            current_cluster = [sorted_prices[i]]
-    
-    if current_cluster:
-        clusters.append(current_cluster)
-    
-    # Encontrar el cluster con mayor volumen total
-    mejor_cluster = max(clusters, key=lambda c: sum(qty for _, qty in c))
-    
-    # Calcular el centro ponderado del mejor cluster
-    total_qty = sum(qty for _, qty in mejor_cluster)
-    weighted_price = sum(p * qty for p, qty in mejor_cluster) / total_qty
-    
-    return round(round(weighted_price / tick) * tick, decimales_tick)
-
 def calcular_precio_promedio_ponderado(price_count, tick, decimales_tick):
-    """Método original - promedio ponderado"""
+    """Calcula el promedio ponderado"""
     if not price_count:
         return 0
     
@@ -124,48 +94,12 @@ def calcular_precio_promedio_ponderado(price_count, tick, decimales_tick):
     weighted_avg = sum(p * q for p, q in price_count.items()) / total_qty
     return round(round(weighted_avg / tick) * tick, decimales_tick)
 
-# ---------- FUNCIONES DE ARCHIVO ----------
-
-RUTA_ARCHIVO = "agrupaciones.txt"
-RUTA_SHOCKS = "shocks_guardados.txt"
-
-def cargar_agrupaciones_guardadas():
-    if os.path.exists(RUTA_ARCHIVO):
-        try:
-            with open(RUTA_ARCHIVO, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Error al cargar agrupaciones: {e}")
-    return {}
-
-def guardar_agrupacion_individual(symbol, valor):
-    agrupaciones = cargar_agrupaciones_guardadas()
-    agrupaciones[symbol] = valor
-    try:
-        with open(RUTA_ARCHIVO, "w") as f:
-            json.dump(agrupaciones, f, indent=4)
-    except Exception as e:
-        print(f"Error al guardar agrupaciones: {e}")
-
-def guardar_puntos_shocks(datos_shocks):
-    try:
-        with open(RUTA_SHOCKS, "a", encoding='utf-8') as f:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"\n--- Analisis guardado: {timestamp} ---\n")
-            for linea in datos_shocks:
-                f.write(f"{linea}\n")
-            f.write("\n")
-        return True
-    except Exception as e:
-        print(f"Error al guardar puntos shocks: {e}")
-        return False
-
 # ---------- OBTENER DATOS BINANCE ----------
 
 def obtener_precio_actual(symbol):
     url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
     try:
-        return float(requests.get(url).json()['price'])
+        return float(requests.get(url, timeout=5).json()['price'])
     except Exception as e:
         print(f"Error al obtener precio: {e}")
         return None
@@ -173,7 +107,7 @@ def obtener_precio_actual(symbol):
 def obtener_tick_size(symbol):
     url = f"https://fapi.binance.com/fapi/v1/exchangeInfo"
     try:
-        data = requests.get(url).json()
+        data = requests.get(url, timeout=5).json()
         for s in data["symbols"]:
             if s["symbol"] == symbol:
                 for f in s["filters"]:
@@ -189,7 +123,7 @@ def cargar_libro_ordenes_api(symbols, base_url="http://localhost:8000"):
     order_books = {}
     for symbol in symbols:
         try:
-            resp = requests.get(f"{base_url}/orderbooks/{symbol}")
+            resp = requests.get(f"{base_url}/orderbooks/{symbol}", timeout=5)
             if resp.status_code == 200:
                 order_books[symbol] = resp.json()
         except Exception as e:
@@ -207,13 +141,14 @@ class OrderBookAnalyzerGUI:
         
         self.symbols = []
         self.selected_symbols = {}
-        self.agrupaciones = cargar_agrupaciones_guardadas()
+        self.agrupaciones = {}  # Agrupaciones en memoria (calculadas automáticamente)
+        self.agrupaciones_custom = {}  # Agrupaciones personalizadas por el usuario
         self.tick_sizes = {}
+        self.precios_actuales = {}  # Cache de precios
         self.is_running = False
         self.analysis_task = None
         
-        # Método de cálculo seleccionado
-        self.metodo_calculo = tk.StringVar(value="densidad_maxima")
+        self.metodo_calculo = tk.StringVar(value="promedio")
         
         self.shocks_actuales = defaultdict(lambda: {'long': [], 'short': []})
         self.shocks_seleccionados = defaultdict(lambda: {'long': None, 'short': None})
@@ -282,11 +217,8 @@ class OrderBookAnalyzerGUI:
                 font=('Arial', 9, 'bold')).pack(side='left', padx=5)
         
         metodos = [
-            ("🎯 Densidad Máx", "densidad_maxima"),
-            ("📍 Moda", "moda"),
-            ("🎲 Clustering", "clustering"),
-            ("📊 Mediana", "mediana"),
-            ("📈 Promedio", "promedio")
+            ("Moda", "moda"),
+            ("Promedio Ponderado", "promedio")
         ]
         
         for texto, valor in metodos:
@@ -327,7 +259,7 @@ class OrderBookAnalyzerGUI:
         info_frame = tk.Frame(results_frame, bg='#334155', relief='groove', bd=2)
         info_frame.pack(fill='x', padx=10, pady=5)
         
-        tk.Label(info_frame, text="💡 Haz clic en los precios para seleccionar/deseleccionar • Se copia automáticamente al portapapeles • Cambia el método de cálculo arriba", 
+        tk.Label(info_frame, text="Haz clic en los precios para seleccionar/deseleccionar • Se copia automáticamente al portapapeles • Cambia el método de cálculo arriba", 
                 bg='#334155', fg='#fbbf24', font=('Arial', 10, 'bold')).pack(pady=8)
         
         self.results_text = scrolledtext.ScrolledText(results_frame, wrap=tk.WORD,
@@ -353,7 +285,7 @@ class OrderBookAnalyzerGUI:
         
     def cargar_symbols(self):
         try:
-            resp = requests.get("http://localhost:8000/symbols")
+            resp = requests.get("http://localhost:8000/symbols", timeout=5)
             data = resp.json()
             self.symbols = data.get("symbols", [])
             self.mostrar_symbols()
@@ -366,6 +298,9 @@ class OrderBookAnalyzerGUI:
         
         ttk.Label(self.symbols_frame, text="Selecciona los simbolos a analizar:",
                  font=('Arial', 12, 'bold')).grid(row=0, column=0, columnspan=3, pady=10, sticky='w')
+        
+        # Cargar datos necesarios en un hilo separado
+        threading.Thread(target=self.cargar_datos_symbols, daemon=True).start()
         
         row = 1
         for symbol in self.symbols:
@@ -388,33 +323,73 @@ class OrderBookAnalyzerGUI:
                            insertbackground='white', font=('Arial', 10))
             entry.pack(side='left', padx=5, pady=5)
             
-            if symbol in self.agrupaciones:
-                entry.insert(0, str(self.agrupaciones[symbol]))
+            # Placeholder inicial
+            entry.insert(0, "Cargando...")
+            entry.config(state='disabled', fg='#888888')
             
-            entry.bind('<FocusOut>', lambda e, s=symbol, en=entry: self.guardar_agrupacion(s, en))
+            # Guardar referencia del entry para actualizar después
+            entry.symbol = symbol
             
             row += 1
     
-    def guardar_agrupacion(self, symbol, entry):
+    def cargar_datos_symbols(self):
+        """Carga los tick_sizes y calcula las agrupaciones óptimas"""
+        for symbol in self.symbols:
+            try:
+                # Obtener tick size
+                tick = obtener_tick_size(symbol)
+                self.tick_sizes[symbol] = tick
+                
+                # Obtener precio actual
+                precio = obtener_precio_actual(symbol)
+                if precio:
+                    self.precios_actuales[symbol] = precio
+                    # Calcular agrupación óptima
+                    agrupacion_optima = obtener_nivel_agrupacion_optimo(tick, precio)
+                    self.agrupaciones[symbol] = agrupacion_optima
+                
+                # Actualizar el entry en la UI
+                self.root.after(0, lambda s=symbol: self.actualizar_entry_agrupacion(s))
+                
+            except Exception as e:
+                print(f"Error cargando datos para {symbol}: {e}")
+    
+    def actualizar_entry_agrupacion(self, symbol):
+        """Actualiza el entry con la agrupación calculada"""
+        try:
+            # Buscar el entry correspondiente
+            for widget in self.symbols_frame.winfo_children():
+                if isinstance(widget, tk.Frame):
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Entry) and hasattr(child, 'symbol') and child.symbol == symbol:
+                            agrupacion = self.agrupaciones.get(symbol, 0.01)
+                            child.config(state='normal', fg='white')
+                            child.delete(0, tk.END)
+                            child.insert(0, str(agrupacion))
+                            child.bind('<FocusOut>', lambda e, s=symbol, en=child: self.guardar_agrupacion_personalizada(s, en))
+                            return
+        except Exception as e:
+            print(f"Error actualizando entry: {e}")
+    
+    def guardar_agrupacion_personalizada(self, symbol, entry):
+        """Guarda la agrupación personalizada si el usuario la modifica"""
         try:
             valor = float(entry.get())
-            guardar_agrupacion_individual(symbol, valor)
-            self.agrupaciones[symbol] = valor
+            self.agrupaciones_custom[symbol] = valor
+            # La agrupación personalizada se usa en place de la automática durante el análisis
         except ValueError:
             pass
     
-    def calcular_precio_segun_metodo(self, price_count, tick, decimales_tick):
+    def obtener_agrupacion_final(self, symbol):
+        """Obtiene la agrupación a usar: personalizada si existe, sino la automática"""
+        return self.agrupaciones_custom.get(symbol, self.agrupaciones.get(symbol, 0.01))
+    
+    def calcular_precio_segun_metodo(self, price_count, tick, decimales_tick, agrupacion_manual=None):
         """Calcula el precio según el método seleccionado"""
         metodo = self.metodo_calculo.get()
         
         if metodo == "moda":
             return calcular_precio_moda(price_count, tick, decimales_tick)
-        elif metodo == "mediana":
-            return calcular_precio_mediana_ponderada(price_count, tick, decimales_tick)
-        elif metodo == "densidad_maxima":
-            return calcular_precio_densidad_maxima(price_count, tick, decimales_tick)
-        elif metodo == "clustering":
-            return calcular_precio_clustering(price_count, tick, decimales_tick)
         else:  # promedio
             return calcular_precio_promedio_ponderado(price_count, tick, decimales_tick)
     
@@ -423,12 +398,6 @@ class OrderBookAnalyzerGUI:
         
         if not symbols_elegidos:
             messagebox.showwarning("Advertencia", "Selecciona al menos un simbolo")
-            return
-        
-        faltantes = [sym for sym in symbols_elegidos if sym not in self.agrupaciones]
-        if faltantes:
-            messagebox.showwarning("Advertencia", 
-                                  f"Se guardo la agrupacion para:\n{', '.join(faltantes)}")
             return
         
         self.is_running = True
@@ -452,7 +421,7 @@ class OrderBookAnalyzerGUI:
         while self.is_running:
             try:
                 self.realizar_analisis(symbols_elegidos)
-                for _ in range(60):
+                for _ in range(300):
                     if not self.is_running:
                         break
                     import time
@@ -464,19 +433,12 @@ class OrderBookAnalyzerGUI:
         self.limpiar_resultados()
         
         metodo_nombre = {
-            "densidad_maxima": "Densidad Máxima",
             "moda": "Moda (Mayor Volumen)",
-            "clustering": "Clustering",
-            "mediana": "Mediana Ponderada",
             "promedio": "Promedio Ponderado"
         }
         
         self.agregar_resultado(f"=== Analisis iniciado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         self.agregar_resultado(f"Método: {metodo_nombre[self.metodo_calculo.get()]}\n\n", 'metodo')
-        
-        for symbol in symbols_elegidos:
-            if symbol not in self.tick_sizes:
-                self.tick_sizes[symbol] = obtener_tick_size(symbol)
         
         order_books = cargar_libro_ordenes_api(symbols_elegidos)
         
@@ -485,27 +447,35 @@ class OrderBookAnalyzerGUI:
             return
         
         for symbol, order_book in order_books.items():
-            agrupacion_manual = self.agrupaciones[symbol]
-            tick = self.tick_sizes[symbol]
+            agrupacion_manual = self.obtener_agrupacion_final(symbol)
+            tick = self.tick_sizes.get(symbol, 0.01)
             decimales_tick = decimales_por_valor(tick)
             
-            bid_ranges, ask_ranges = {}, {}
+            # Recolectar TODOS los precios sin pre-agrupar
+            price_count_bids = {}
+            price_count_asks = {}
             
             for price, qty in order_book['bids'].items():
                 price, qty = float(price), float(qty)
-                range_key = agrupar_precio_manual(price, agrupacion_manual)
-                if range_key not in bid_ranges:
-                    bid_ranges[range_key] = {'total_qty': 0, 'price_count': {}}
-                bid_ranges[range_key]['total_qty'] += qty
-                bid_ranges[range_key]['price_count'][price] = bid_ranges[range_key]['price_count'].get(price, 0) + qty
+                price_count_bids[price] = price_count_bids.get(price, 0) + qty
             
             for price, qty in order_book['asks'].items():
                 price, qty = float(price), float(qty)
+                price_count_asks[price] = price_count_asks.get(price, 0) + qty
+            
+            # Agrupar los resultados DESPUÉS de calcular
+            bid_ranges = defaultdict(lambda: {'total_qty': 0, 'price_count': {}})
+            ask_ranges = defaultdict(lambda: {'total_qty': 0, 'price_count': {}})
+            
+            for price, qty in price_count_bids.items():
                 range_key = agrupar_precio_manual(price, agrupacion_manual)
-                if range_key not in ask_ranges:
-                    ask_ranges[range_key] = {'total_qty': 0, 'price_count': {}}
+                bid_ranges[range_key]['total_qty'] += qty
+                bid_ranges[range_key]['price_count'][price] = qty
+            
+            for price, qty in price_count_asks.items():
+                range_key = agrupar_precio_manual(price, agrupacion_manual)
                 ask_ranges[range_key]['total_qty'] += qty
-                ask_ranges[range_key]['price_count'][price] = ask_ranges[range_key]['price_count'].get(price, 0) + qty
+                ask_ranges[range_key]['price_count'][price] = qty
             
             top_bid_ranges = sorted(bid_ranges.items(), key=lambda x: x[1]['total_qty'], reverse=True)[:6]
             top_ask_ranges = sorted(ask_ranges.items(), key=lambda x: x[1]['total_qty'], reverse=True)[:6]
@@ -522,7 +492,7 @@ class OrderBookAnalyzerGUI:
             long_shocks = []
             for pr_range, data in top_bid_ranges[2:]:
                 precio_calculado = self.calcular_precio_segun_metodo(
-                    data['price_count'], tick, decimales_tick
+                    data['price_count'], tick, decimales_tick, agrupacion_manual
                 )
                 volumen_formateado = formatear_volumen(data['total_qty'])
                 long_shocks.append(precio_calculado)
@@ -537,7 +507,7 @@ class OrderBookAnalyzerGUI:
             short_shocks = []
             for pr_range, data in top_ask_ranges[2:]:
                 precio_calculado = self.calcular_precio_segun_metodo(
-                    data['price_count'], tick, decimales_tick
+                    data['price_count'], tick, decimales_tick, agrupacion_manual
                 )
                 volumen_formateado = formatear_volumen(data['total_qty'])
                 short_shocks.append(precio_calculado)
@@ -575,11 +545,9 @@ class OrderBookAnalyzerGUI:
         current_selection = self.shocks_seleccionados[symbol][tipo]
         
         if current_selection == precio:
-            # Deseleccionar
             self.shocks_seleccionados[symbol][tipo] = None
             self.results_text.tag_remove('selected', f"{tag_id}.first", f"{tag_id}.last")
         else:
-            # Seleccionar
             if current_selection is not None:
                 old_tag = f"{symbol}_{tipo}_{current_selection}"
                 self.results_text.tag_remove('selected', f"{old_tag}.first", f"{old_tag}.last")
@@ -587,13 +555,10 @@ class OrderBookAnalyzerGUI:
             self.shocks_seleccionados[symbol][tipo] = precio
             self.results_text.tag_add('selected', f"{tag_id}.first", f"{tag_id}.last")
             
-            # Copiar al portapapeles
             precio_str = f"{precio:.10f}".rstrip('0').rstrip('.')
             try:
                 pyperclip.copy(precio_str)
-                # Mostrar en el label de estado
                 self.copy_label.config(text=f"✓ Copiado: {precio_str}")
-                # Limpiar el mensaje después de 2 segundos
                 self.root.after(2000, lambda: self.copy_label.config(text=""))
             except Exception as e:
                 print(f"Error al copiar al portapapeles: {e}")
@@ -628,13 +593,20 @@ class OrderBookAnalyzerGUI:
             messagebox.showwarning("Advertencia", "Selecciona al menos un punto shock haciendo clic en los precios")
             return
         
-        if guardar_puntos_shocks(datos_a_guardar):
-            messagebox.showinfo("Exito", f"Se guardaron {len(datos_a_guardar)} lineas en {RUTA_SHOCKS}")
-        else:
-            messagebox.showerror("Error", "No se pudo guardar el archivo")
+        # Guardar en archivo
+        ruta_shocks = "shocks_guardados.txt"
+        try:
+            with open(ruta_shocks, "a", encoding='utf-8') as f:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"\n--- Analisis guardado: {timestamp} ---\n")
+                for linea in datos_a_guardar:
+                    f.write(f"{linea}\n")
+                f.write("\n")
+            messagebox.showinfo("Exito", f"Se guardaron {len(datos_a_guardar)} lineas en {ruta_shocks}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar el archivo: {e}")
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = OrderBookAnalyzerGUI(root)
     root.mainloop()
-
