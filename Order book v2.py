@@ -39,7 +39,7 @@ for el in futures_info:
     if (
         symbol in perpetual_symbols
         and float(el.get('quoteVolume', 0)) > 200_000_000
-        and float(el.get('lastPrice', 0)) < 30
+        and float(el.get('lastPrice', 0)) < 40
     ):
         coins.append(symbol)
 
@@ -54,7 +54,9 @@ order_books = {
         "lastUpdateId": None,
         "buffer": [],
         "initialized": False,
-        "last_u": None
+        "last_u": None,
+        "retry_count": 0,  # Para retry exponencial
+        "first_event_after_snapshot": True  # Bandera para el primer evento
     } for symbol in coins
 }
 order_book_lock = threading.Lock()
@@ -127,37 +129,48 @@ def apply_order_book_update(symbol, data):
 def on_message(ws, message, symbol):
     try:
         data = json.loads(message)['data']
-        
+
         with order_book_lock:
             book = order_books[symbol]
-            
-            # Si no está inicializado, agregar al buffer
+
+            # Si no está inicializado, agregar al buffer (optimizado: consolidar eventos)
             if not book['initialized']:
+                # Optimización: Si ya existe un evento que cubre este rango, eliminarlo
+                # Según Binance: "Por el mismo precio, la última actualización cubre la anterior"
+                book['buffer'] = [e for e in book['buffer'] if not (e['u'] < data['U'])]
                 book['buffer'].append(data)
                 return
             
-            # Si acabamos de inicializar y last_u es el lastUpdateId del snapshot,
-            # validar que este sea el primer evento después del snapshot
-            if book['last_u'] == book['lastUpdateId']:
-                # Primer evento después del snapshot
+            # Paso 6: Verificar continuidad (pu debe ser igual al u anterior)
+            # Excepción: El primer evento después del snapshot puede tener pu < lastUpdateId
+            if book['first_event_after_snapshot']:
+                # Primer evento: validar que U <= lastUpdateId <= u (según docs Binance)
                 if data['U'] <= book['lastUpdateId'] <= data['u']:
-                    # Evento válido, aplicar y continuar
+                    # Evento válido, procesar y desactivar bandera
+                    book['first_event_after_snapshot'] = False
                     apply_order_book_update(symbol, data)
                     return
                 elif data['u'] < book['lastUpdateId']:
                     # Evento antiguo, ignorar
                     return
-                # Si no cumple las condiciones, continuar con verificación normal
-            
-            # Paso 6: Verificar continuidad (pu debe ser igual al u anterior)
+                else:
+                    # Evento no cubre el lastUpdateId, puede ser discontinuidad
+                    print(f"⚠️ Primer evento no cubre lastUpdateId en {symbol}. U={data['U']}, u={data['u']}, lastUpdateId={book['lastUpdateId']}")
+                    book['initialized'] = False
+                    book['buffer'] = [data]
+                    threading.Thread(target=reinitialize_symbol, args=(symbol,), daemon=True).start()
+                    return
+
+            # Validación normal de continuidad para eventos subsecuentes
             if data['pu'] != book['last_u']:
                 print(f"⚠️ Discontinuidad detectada en {symbol}. Esperado pu={book['last_u']}, recibido pu={data['pu']}")
                 # Reiniciar el proceso
                 book['initialized'] = False
+                book['first_event_after_snapshot'] = True
                 book['buffer'] = [data]
                 threading.Thread(target=reinitialize_symbol, args=(symbol,), daemon=True).start()
                 return
-            
+
             # Aplicar la actualización
             apply_order_book_update(symbol, data)
             
@@ -170,42 +183,57 @@ def reinitialize_symbol(symbol):
     time.sleep(1)  # Esperar un poco antes de reinicializar
     initialize_order_book(symbol)
 
-def initialize_order_book(symbol):
-    """Inicializa el order book con snapshot y procesa buffer"""
+def initialize_order_book(symbol, retry_count=0):
+    """Inicializa el order book con snapshot y procesa buffer con retry exponencial"""
+    max_retries = 10
+    base_delay = 1
+    max_delay = 60
+
     try:
         # Esperar un poco para acumular eventos en el buffer
         time.sleep(3)
-        
+
         # Paso 3: Obtener snapshot
         snap = get_order_book_snapshot(symbol)
-        
+
         with order_book_lock:
             book = order_books[symbol]
-            
+
             # Limpiar order book
             book['bids'].clear()
             book['asks'].clear()
-            
+
             # Cargar snapshot
             for bid in snap['bids']:
                 book['bids'][bid[0]] = bid[1]
             for ask in snap['asks']:
                 book['asks'][ask[0]] = ask[1]
-            
+
             book['lastUpdateId'] = snap['lastUpdateId']
+            book['retry_count'] = 0  # Reset en caso de éxito
             print(f"📸 Snapshot cargado para {symbol} (lastUpdateId: {snap['lastUpdateId']}, buffer: {len(book['buffer'])} eventos)")
-        
+
         # Procesar buffer
         if not process_buffer(symbol):
-            # Si falla, reintentar
-            print(f"🔄 Reintentando inicialización de {symbol}...")
-            time.sleep(2)
-            initialize_order_book(symbol)
-            
+            # Si falla, reintentar con backoff exponencial
+            if retry_count < max_retries:
+                delay = min(base_delay * (2 ** retry_count), max_delay)
+                print(f"🔄 Reintentando inicialización de {symbol} en {delay}s (intento {retry_count + 1}/{max_retries})...")
+                time.sleep(delay)
+                initialize_order_book(symbol, retry_count + 1)
+            else:
+                print(f"❌ Máximo de reintentos alcanzado para {symbol}")
+
     except Exception as e:
-        print(f"💥 Error inicializando {symbol}: {e}")
-        time.sleep(5)
-        initialize_order_book(symbol)
+        if retry_count < max_retries:
+            # Retry exponencial: 1s, 2s, 4s, 8s, 16s, 32s, 60s (max)
+            delay = min(base_delay * (2 ** retry_count), max_delay)
+            print(f"💥 Error inicializando {symbol}: {e}")
+            print(f"🔄 Reintentando en {delay}s (intento {retry_count + 1}/{max_retries})...")
+            time.sleep(delay)
+            initialize_order_book(symbol, retry_count + 1)
+        else:
+            print(f"❌ Error crítico en {symbol} después de {max_retries} intentos: {e}")
 
 def start_websocket(symbol):
     """Conexión WebSocket con reconexión automática"""
@@ -214,9 +242,9 @@ def start_websocket(symbol):
             print(f"🔌 Conectando WebSocket para {symbol}...")
             ws = websocket.WebSocketApp(
                 f"wss://fstream.binance.com/stream?streams={symbol.lower()}@depth@100ms",
-                on_message=lambda ws, msg: on_message(ws, msg, symbol),
-                on_error=lambda ws, err: print(f"⚠️ Error WS {symbol}: {err}"),
-                on_close=lambda ws, code, msg: print(f"❌ WS cerrado {symbol}: {msg}"),
+                on_message=lambda _, msg: on_message(_, msg, symbol),
+                on_error=lambda _, err: print(f"⚠️ Error WS {symbol}: {err}"),
+                on_close=lambda _, __, msg: print(f"❌ WS cerrado {symbol}: {msg}"),
             )
             ws.run_forever()
         except Exception as e:
@@ -226,6 +254,7 @@ def start_websocket(symbol):
         with order_book_lock:
             order_books[symbol]['initialized'] = False
             order_books[symbol]['buffer'] = []
+            order_books[symbol]['first_event_after_snapshot'] = True
         
         print(f"🔁 Reintentando conexión para {symbol} en 5 segundos...")
         time.sleep(5)
